@@ -109,8 +109,7 @@ class MessageProcessor(object):
         }
 
     def log_message(self,
-                    message: UserMessage,
-                    metadata: Optional[Dict[Text, Any]]
+                    message: UserMessage
                     ) -> Optional[DialogueStateTracker]:
 
         # preprocess message if necessary
@@ -118,7 +117,7 @@ class MessageProcessor(object):
             message.text = self.message_preprocessor(message.text)
         # we have a Tracker instance for each user
         # which maintains conversation state
-        tracker = self._get_tracker(message.sender_id, metadata)
+        tracker = self._get_tracker(message.sender_id, message.metadata)
         if tracker:
             self._handle_message_with_tracker(message, tracker)
             # save tracker state to continue conversation from this state

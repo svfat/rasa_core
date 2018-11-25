@@ -1,9 +1,8 @@
-import typing
-from collections import deque
-
 import copy
 import io
 import logging
+import typing
+from collections import deque
 from enum import Enum
 from typing import Generator, Dict, Text, Any, Optional, Iterator
 from typing import List
@@ -362,6 +361,7 @@ class DialogueStateTracker(object):
 
         self._reset()
         self.events.extend(dialogue.events)
+        self.metadata = dialogue.metadata
         self.replay_events()
 
     def copy(self):

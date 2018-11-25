@@ -317,9 +317,13 @@ def create_app(agent,
         verbosity = event_verbosity_parameter(default_verbosity)
 
         request_params = request_parameters()
+        if "metadata" in request_params:
+            metadata = json.loads(request_params["metadata"])
+        else:
+            metadata = None
         # retrieve tracker and set to requested state
         tracker = agent.tracker_store.get_or_create_tracker(
-                sender_id, request_params.get("metadata"))
+                sender_id, metadata)
         if not tracker:
             return error(503,
                          "NoDomain",

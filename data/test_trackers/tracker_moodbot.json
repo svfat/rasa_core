@@ -29,6 +29,7 @@
   "followup_action": null,
   "slots": {"name": null},
   "latest_input_channel": null,
+  "metadata": null,
   "events": [
     {
       "timestamp": 1517821726.211031,

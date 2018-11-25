@@ -428,7 +428,7 @@ class MessageProcessor(object):
             tracker.update(e)
 
     def _get_tracker(self, sender_id: Text,
-                     metadata: Optional[Dict[Text, Any]]
+                     metadata: Optional[Dict[Text, Any]] = None
                      ) -> Optional[DialogueStateTracker]:
 
         sender_id = sender_id or UserMessage.DEFAULT_SENDER_ID

@@ -63,7 +63,7 @@ class TrackerStore(object):
             tracker = self.create_tracker(sender_id, metadata)
         return tracker
 
-    def init_tracker(self, sender_id, metadata):
+    def init_tracker(self, sender_id, metadata=None):
         if self.domain:
             return DialogueStateTracker(sender_id,
                                         self.domain.slots,
@@ -88,7 +88,7 @@ class TrackerStore(object):
         raise NotImplementedError()
 
     def retrieve(self, sender_id: Text,
-                 metadata: Optional[Dict[Text, Any]]
+                 metadata: Optional[Dict[Text, Any]] = None
                  ) -> Optional[DialogueStateTracker]:
         raise NotImplementedError()
 
@@ -142,7 +142,7 @@ class InMemoryTrackerStore(TrackerStore):
         return tracker.metadata == metadata
 
     def retrieve(self, sender_id: Text,
-                 metadata: Optional[Dict[Text, Any]]
+                 metadata: Optional[Dict[Text, Any]] = None
                  ) -> Optional[DialogueStateTracker]:
         if sender_id in self.store:
             tracker = self.deserialise_tracker(sender_id,
@@ -190,7 +190,7 @@ class RedisTrackerStore(TrackerStore):
 
         return stored.get("metadata") == metadata
 
-    def retrieve(self, sender_id, metadata):
+    def retrieve(self, sender_id, metadata=None):
         stored = self.red.get(sender_id)
         if stored is not None and \
                 self._metadata_matches(metadata, stored):
@@ -249,7 +249,7 @@ class MongoTrackerStore(TrackerStore):
 
         return stored.get("metadata") == metadata
 
-    def retrieve(self, sender_id, metadata):
+    def retrieve(self, sender_id, metadata=None):
         stored = self.conversations.find_one({"sender_id": sender_id})
 
         # look for conversations which have used an `int` sender_id in the past

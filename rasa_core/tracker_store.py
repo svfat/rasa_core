@@ -1,10 +1,10 @@
-import itertools
-
 import json
 import logging
 import pickle
 # noinspection PyPep8Naming
-from typing import Text, Optional, List, KeysView
+from typing import Text, Optional, List, KeysView, Dict, Any
+
+import itertools
 
 from rasa_core.actions.action import ACTION_LISTEN_NAME
 from rasa_core.broker import EventChannel
@@ -57,25 +57,27 @@ class TrackerStore(object):
         else:
             return InMemoryTrackerStore(domain)
 
-    def get_or_create_tracker(self, sender_id):
-        tracker = self.retrieve(sender_id)
+    def get_or_create_tracker(self, sender_id, metadata=None):
+        tracker = self.retrieve(sender_id, metadata)
         if tracker is None:
-            tracker = self.create_tracker(sender_id)
+            tracker = self.create_tracker(sender_id, metadata)
         return tracker
 
-    def init_tracker(self, sender_id):
+    def init_tracker(self, sender_id, metadata):
         if self.domain:
             return DialogueStateTracker(sender_id,
-                                        self.domain.slots)
+                                        self.domain.slots,
+                                        metadata=metadata)
         else:
             return None
 
-    def create_tracker(self, sender_id, append_action_listen=True):
+    def create_tracker(self, sender_id,
+                       append_action_listen=True, metadata=None):
         """Creates a new tracker for the sender_id.
 
         The tracker is initially listening."""
 
-        tracker = self.init_tracker(sender_id)
+        tracker = self.init_tracker(sender_id, metadata)
         if tracker:
             if append_action_listen:
                 tracker.update(ActionExecuted(ACTION_LISTEN_NAME))
@@ -85,16 +87,20 @@ class TrackerStore(object):
     def save(self, tracker):
         raise NotImplementedError()
 
-    def retrieve(self, sender_id: Text) -> Optional[DialogueStateTracker]:
+    def retrieve(self, sender_id: Text,
+                 metadata: Optional[Dict[Text, Any]]
+                 ) -> Optional[DialogueStateTracker]:
         raise NotImplementedError()
 
-    def stream_events(self, tracker: DialogueStateTracker) -> None:
+    def stream_events(self,
+                      tracker: DialogueStateTracker) -> None:
         old_tracker = self.retrieve(tracker.sender_id)
         offset = len(old_tracker.events) if old_tracker else 0
         evts = tracker.events
         for evt in list(itertools.islice(evts, offset, len(evts))):
             body = {
                 "sender_id": tracker.sender_id,
+                "metadata": tracker.metadata
             }
             body.update(evt.as_dict())
             self.event_broker.publish(json.dumps(body))
@@ -118,7 +124,7 @@ class TrackerStore(object):
 class InMemoryTrackerStore(TrackerStore):
     def __init__(self,
                  domain: Domain,
-                 event_broker: Optional[EventChannel]=None
+                 event_broker: Optional[EventChannel] = None
                  ) -> None:
         self.store = {}
         super(InMemoryTrackerStore, self).__init__(domain, event_broker)
@@ -129,15 +135,26 @@ class InMemoryTrackerStore(TrackerStore):
         serialised = InMemoryTrackerStore.serialise_tracker(tracker)
         self.store[tracker.sender_id] = serialised
 
-    def retrieve(self, sender_id: Text) -> Optional[DialogueStateTracker]:
+    def _metadata_matches(self, tracker, metadata):
+        if not metadata:
+            return True
+
+        return tracker.metadata == metadata
+
+    def retrieve(self, sender_id: Text,
+                 metadata: Optional[Dict[Text, Any]]
+                 ) -> Optional[DialogueStateTracker]:
         if sender_id in self.store:
-            logger.debug('Recreating tracker for '
-                         'id \'{}\''.format(sender_id))
-            return self.deserialise_tracker(sender_id, self.store[sender_id])
-        else:
-            logger.debug('Creating a new tracker for '
-                         'id \'{}\'.'.format(sender_id))
-            return None
+            tracker = self.deserialise_tracker(sender_id,
+                                               self.store[sender_id])
+            if self._metadata_matches(tracker, metadata):
+                logger.debug('Recreating tracker for '
+                             'id \'{}\''.format(sender_id))
+                return tracker
+
+        logger.debug('Creating a new tracker for '
+                     'id \'{}\'.'.format(sender_id))
+        return None
 
     def keys(self) -> KeysView[Text]:
         return self.store.keys()
@@ -167,9 +184,16 @@ class RedisTrackerStore(TrackerStore):
         serialised_tracker = self.serialise_tracker(tracker)
         self.red.set(tracker.sender_id, serialised_tracker, ex=timeout)
 
-    def retrieve(self, sender_id):
+    def _metadata_matches(self, metadata, stored):
+        if not metadata:
+            return True
+
+        return stored.get("metadata") == metadata
+
+    def retrieve(self, sender_id, metadata):
         stored = self.red.get(sender_id)
-        if stored is not None:
+        if stored is not None and \
+                self._metadata_matches(metadata, stored):
             return self.deserialise_tracker(sender_id, stored)
         else:
             return None
@@ -215,11 +239,17 @@ class MongoTrackerStore(TrackerStore):
         state = tracker.current_state(EventVerbosity.ALL)
 
         self.conversations.update_one(
-            {"sender_id": tracker.sender_id},
-            {"$set": state},
-            upsert=True)
+                {"sender_id": tracker.sender_id},
+                {"$set": state},
+                upsert=True)
 
-    def retrieve(self, sender_id):
+    def _metadata_matches(self, stored, metadata):
+        if not metadata:
+            return True
+
+        return stored.get("metadata") == metadata
+
+    def retrieve(self, sender_id, metadata):
         stored = self.conversations.find_one({"sender_id": sender_id})
 
         # look for conversations which have used an `int` sender_id in the past
@@ -227,11 +257,11 @@ class MongoTrackerStore(TrackerStore):
         if stored is None and sender_id.isdigit():
             from pymongo import ReturnDocument
             stored = self.conversations.find_one_and_update(
-                {"sender_id": int(sender_id)},
-                {"$set": {"sender_id": str(sender_id)}},
-                return_document=ReturnDocument.AFTER)
+                    {"sender_id": int(sender_id)},
+                    {"$set": {"sender_id": str(sender_id)}},
+                    return_document=ReturnDocument.AFTER)
 
-        if stored is not None:
+        if stored is not None and self._metadata_matches(stored, metadata):
             if self.domain:
                 return DialogueStateTracker.from_dict(sender_id,
                                                       stored.get("events"),

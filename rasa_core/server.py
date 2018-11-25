@@ -34,11 +34,11 @@ def ensure_loaded_agent(agent):
         def decorated(*args, **kwargs):
             if not agent.is_ready():
                 return error(
-                    503,
-                    "NoAgent",
-                    "No agent loaded. To continue processing, a "
-                    "model of a trained agent needs to be loaded.",
-                    help_url=_docs("/server.html#running-the-http-server"))
+                        503,
+                        "NoAgent",
+                        "No agent loaded. To continue processing, a "
+                        "model of a trained agent needs to be loaded.",
+                        help_url=_docs("/server.html#running-the-http-server"))
 
             return f(*args, **kwargs)
 
@@ -105,17 +105,17 @@ def requires_auth(app: Flask,
                 if sufficient_scope(*args, **kwargs):
                     return f(*args, **kwargs)
                 abort(error(
-                    403, "NotAuthorized",
-                    "User has insufficient permissions.",
-                    help_url=_docs(
-                        "/server.html#security-considerations")))
+                        403, "NotAuthorized",
+                        "User has insufficient permissions.",
+                        help_url=_docs(
+                                "/server.html#security-considerations")))
             elif token is None and app.config.get('JWT_ALGORITHM') is None:
                 # authentication is disabled
                 return f(*args, **kwargs)
 
             abort(error(
-                401, "NotAuthenticated", "User is not authenticated.",
-                help_url=_docs("/server.html#security-considerations")))
+                    401, "NotAuthenticated", "User is not authenticated.",
+                    help_url=_docs("/server.html#security-considerations")))
 
         return decorated
 
@@ -124,21 +124,21 @@ def requires_auth(app: Flask,
 
 def error(status, reason, message, details=None, help_url=None):
     return Response(
-        json.dumps({
-            "version": __version__,
-            "status": "failure",
-            "message": message,
-            "reason": reason,
-            "details": details or {},
-            "help": help_url,
-            "code": status}),
-        status=status,
-        content_type="application/json")
+            json.dumps({
+                "version": __version__,
+                "status": "failure",
+                "message": message,
+                "reason": reason,
+                "details": details or {},
+                "help": help_url,
+                "code": status}),
+            status=status,
+            content_type="application/json")
 
 
 def event_verbosity_parameter(default_verbosity):
     event_verbosity_str = request.args.get(
-        'include_events', default=default_verbosity.name).upper()
+            'include_events', default=default_verbosity.name).upper()
     try:
         return EventVerbosity[event_verbosity_str]
     except KeyError:
@@ -253,8 +253,8 @@ def create_app(agent,
             return jsonify(tracker.current_state(verbosity))
         else:
             logger.warning(
-                "Append event called, but could not extract a "
-                "valid event. Request JSON: {}".format(request_params))
+                    "Append event called, but could not extract a "
+                    "valid event. Request JSON: {}".format(request_params))
             return error(400, "InvalidParameter",
                          "Couldn't extract a proper event from the request "
                          "body.",
@@ -316,8 +316,10 @@ def create_app(agent,
 
         verbosity = event_verbosity_parameter(default_verbosity)
 
+        request_params = request_parameters()
         # retrieve tracker and set to requested state
-        tracker = agent.tracker_store.get_or_create_tracker(sender_id)
+        tracker = agent.tracker_store.get_or_create_tracker(
+                sender_id, request_params.get("metadata"))
         if not tracker:
             return error(503,
                          "NoDomain",
@@ -472,7 +474,7 @@ def create_app(agent,
         zip_ref.extractall(model_directory)
         zip_ref.close()
         logger.debug("Unzipped model to {}".format(
-            os.path.abspath(model_directory)))
+                os.path.abspath(model_directory)))
 
         ensemble = PolicyEnsemble.load(model_directory)
         agent.policy_ensemble = ensemble

@@ -27,7 +27,8 @@ class UserMessage(object):
                  output_channel: Optional['OutputChannel'] = None,
                  sender_id: Text = None,
                  parse_data: Dict[Text, Any] = None,
-                 input_channel: Text = None
+                 input_channel: Text = None,
+                 metadata: Optional[Dict[Text, Any]] = None,
                  ) -> None:
 
         self.text = text
@@ -46,6 +47,8 @@ class UserMessage(object):
 
         self.parse_data = parse_data
 
+        self.metadata = metadata
+
 
 def register(input_channels: List['InputChannel'],
              app: Flask,
@@ -60,9 +63,9 @@ def register(input_channels: List['InputChannel'],
 def button_to_string(button, idx=0):
     """Create a string representation of a button."""
     return "{idx}: {title} ({val})".format(
-        idx=idx + 1,
-        title=button.get('title', ''),
-        val=button.get('payload', ''))
+            idx=idx + 1,
+            title=button.get('title', ''),
+            val=button.get('payload', ''))
 
 
 class InputChannel(object):
@@ -85,7 +88,7 @@ class InputChannel(object):
         The blueprint will be attached to a running flask server and handel
         incoming routes it registered for."""
         raise NotImplementedError(
-            "Component listener needs to provide blueprint.")
+                "Component listener needs to provide blueprint.")
 
     @classmethod
     def raise_missing_credentials_exception(cls):
@@ -172,10 +175,10 @@ class OutputChannel(object):
 
         for element in elements:
             element_msg = "{title} : {subtitle}".format(
-                title=element.get('title', ''),
-                subtitle=element.get('subtitle', ''))
+                    title=element.get('title', ''),
+                    subtitle=element.get('subtitle', ''))
             self.send_text_with_buttons(
-                recipient_id, element_msg, element.get('buttons', []))
+                    recipient_id, element_msg, element.get('buttons', []))
 
 
 class CollectingOutputChannel(OutputChannel):
@@ -272,11 +275,12 @@ class RestInput(InputChannel):
         return "rest"
 
     @staticmethod
-    def on_message_wrapper(on_new_message, text, queue, sender_id):
+    def on_message_wrapper(on_new_message, text, queue, sender_id, metadata):
         collector = QueueOutputChannel(queue)
 
         message = UserMessage(text, collector, sender_id,
-                              input_channel=RestInput.name())
+                              input_channel=RestInput.name(),
+                              metadata=metadata)
         on_new_message(message)
 
         queue.put("DONE")
@@ -284,17 +288,20 @@ class RestInput(InputChannel):
     def _extract_sender(self, req):
         return req.json.get("sender", None)
 
+    def _extract_metadata(self, req):
+        return req.json.get("metadata", None)
+
     # noinspection PyMethodMayBeStatic
     def _extract_message(self, req):
         return req.json.get("message", None)
 
-    def stream_response(self, on_new_message, text, sender_id):
+    def stream_response(self, on_new_message, text, sender_id, metadata):
         from multiprocessing import Queue
 
         q = Queue()
 
         t = Thread(target=self.on_message_wrapper,
-                   args=(on_new_message, text, q, sender_id))
+                   args=(on_new_message, text, q, sender_id, metadata))
         t.start()
         while True:
             response = q.get()
@@ -305,8 +312,8 @@ class RestInput(InputChannel):
 
     def blueprint(self, on_new_message):
         custom_webhook = Blueprint(
-            'custom_webhook_{}'.format(type(self).__name__),
-            inspect.getmodule(self).__name__)
+                'custom_webhook_{}'.format(type(self).__name__),
+                inspect.getmodule(self).__name__)
 
         @custom_webhook.route("/", methods=['GET'])
         def health():
@@ -316,16 +323,19 @@ class RestInput(InputChannel):
         def receive():
             sender_id = self._extract_sender(request)
             text = self._extract_message(request)
+            metadata = self._extract_metadata(request)
             should_use_stream = utils.bool_arg("stream", default=False)
 
             if should_use_stream:
                 return Response(
-                    self.stream_response(on_new_message, text, sender_id),
-                    content_type='text/event-stream')
+                        self.stream_response(on_new_message,
+                                             text, sender_id, metadata),
+                        content_type='text/event-stream')
             else:
                 collector = CollectingOutputChannel()
                 on_new_message(UserMessage(text, collector, sender_id,
-                                           input_channel=self.name()))
+                                           input_channel=self.name(),
+                                           metadata=metadata))
                 return jsonify(collector.messages)
 
         return custom_webhook

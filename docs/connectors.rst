@@ -1,3 +1,7 @@
+:desc: Choose Facebook, Slack or Telegram as your channel for contextual
+       Assistants and chatbots or build new ones for your own app or website
+       using open source Rasa Stack. 
+
 .. _connectors:
 
 Chat & Voice platforms
@@ -138,8 +142,8 @@ After you have created the bot through Cisco Webex Teams, you need to create a
 room in Cisco Webex Teams. Then add the bot in the room the same way you would
 add a person in the room.
 
-You need to note down the room ID for the room you created. This room ID will be
-used in ``room`` variable in the ``credentials.yml`` file.
+You need to note down the room ID for the room you created. This room ID will
+be used in ``room`` variable in the ``credentials.yml`` file.
 
 Please follow this link below to find the room ID
 ``https://developer.webex.com/endpoint-rooms-get.html``
@@ -234,7 +238,7 @@ you need to supply a ``credentials.yml`` with the following content:
 
    slack:
      slack_token: "xoxb-286425452756-safjasdf7sl38KLls"
-     slack_channel: "@my_channel"
+     slack_channel: "#my_channel" <!-- or "@my_app" -->
 
 
 The endpoint for receiving slack messages is
@@ -605,9 +609,20 @@ you need to supply a ``credentials.yml`` with the following content:
    socketio:
      user_message_evt: user_uttered
      bot_message_evt: bot_uttered
+     session_persistence: true/false
 
-These two configuration values define the event names used by Rasa Core
+The first two configuration values define the event names used by Rasa Core
 when sending or receiving messages over socket.io.
+
+By default, the socketio channel uses the socket id as sender_id which causes
+the session to restart at every page reload. ``session_persistence`` can be
+set to ``true`` to avoid that. In that case, the frontend is responsible
+for generating a session id and sending it to the Rasa Core server by
+emitting the event ``session_request`` with ``{session_id: [session_id]}``
+immediately after the ``connect`` event.
+
+The example `Webchat <https://github.com/mrbot-ai/rasa-webchat>`_
+implements this session creation mechanism (version >= 0.5.0).
 
 Directly using python
 ^^^^^^^^^^^^^^^^^^^^^
@@ -756,7 +771,7 @@ use the ``rasa_core.channels.channel.RestInput`` class as a template.
 The methods you need to implement are ``blueprint`` and ``name``. The method
 needs to create a Flask blueprint that can be attached to a flask server.
 
-This allows you to add `REST` endpoints to the server, the external
+This allows you to add `REST` endpoints to the server, which the external
 messaging service can call to deliver messages.
 
 Your blueprint should have at least the two routes ``health`` on ``/``
@@ -786,14 +801,20 @@ are methods to send text and images) or you can use the
 ``CollectingOutputChannel`` to collect the bot responses Core
 creates while the bot is processing your messages and return
 them as part of your endpoint response. This is the way the ``RestInput``
-is implemented. For examples on how to create and use your own output
+channel is implemented. For examples on how to create and use your own output
 channel, please take a look at the implementations of the other
 output channels, e.g. the ``SlackBot`` in ``rasa_core.channels.slack``.
 
-To use a custom channel, you can use the ``rasa_core.run`` script,
-passing in the classpath of your custom channel using
-``--channel mypackage.MyIO`` or you can write your own code
-hooking up the agent with the channel.
+To use a custom channel, you need to supply a credentials configuration file
+``credentials.yml`` with the command line argument ``--credentials``.
+This credentials file has to contain the module path of your custom channel and
+any required configuration parameters. This could e.g. look like:
+
+.. code-block:: yaml
+
+    mypackage.MyIO:
+      username: "user_name"
+      another_parameter: "some value"
 
 Example implementation for an input channel that receives the messages,
 hands them over to Rasa Core, collects the bot utterances and returns

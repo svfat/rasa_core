@@ -3,20 +3,17 @@ import typing
 import collections
 import json
 import logging
-import numpy as np
 import os
 import pkg_resources
 from pykwalify.errors import SchemaError
+
 from rasa_core import utils
 from rasa_core.actions import Action, action
 from rasa_core.constants import REQUESTED_SLOT
 from rasa_core.slots import Slot, UnfeaturizedSlot
 from rasa_core.trackers import SlotSet
 from rasa_core.utils import read_file, read_yaml_string, EndpointConfig
-from typing import Dict, Any, Tuple
-from typing import List
-from typing import Optional
-from typing import Text
+from typing import Dict, Any, Tuple, List, Optional, Text
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +138,12 @@ class Domain(object):
         merged_intents = merge_dicts(intents_1, intents_2, override)
         combined['intents'] = list(merged_intents.values())
 
-        for key in ['entities', 'actions']:
+        # remove existing forms from new actions
+        for form in combined['forms']:
+            if form in domain_dict['actions']:
+                domain_dict['actions'].remove(form)
+
+        for key in ['entities', 'actions', 'forms']:
             combined[key] = merge_lists(combined[key],
                                         domain_dict[key])
 
@@ -292,9 +294,10 @@ class Domain(object):
         This method resolves the index to the actions name."""
 
         if self.num_actions <= index or index < 0:
-            raise IndexError(
-                "Can not access action at index {}. "
-                "Domain has {} actions.".format(index, self.num_actions))
+            raise IndexError("Cannot access action at index {}. "
+                             "Domain has {} actions."
+                             "".format(index, self.num_actions))
+
         return self.action_for_name(self.action_names[index],
                                     action_endpoint)
 
@@ -313,13 +316,15 @@ class Domain(object):
     def _raise_action_not_found_exception(self, action_name):
         action_names = "\n".join(["\t - {}".format(a)
                                   for a in self.action_names])
-        raise NameError(
-            "Can not access action '{}', "
-            "as that name is not a registered action for this domain. "
-            "Available actions are: \n{}"
-            "".format(action_name, action_names))
+        raise NameError("Cannot access action '{}', "
+                        "as that name is not a registered "
+                        "action for this domain. "
+                        "Available actions are: \n{}"
+                        "".format(action_name, action_names))
 
     def random_template_for(self, utter_action):
+        import numpy as np
+
         if utter_action in self.templates:
             return np.random.choice(self.templates[utter_action])
         else:
@@ -403,8 +408,9 @@ class Domain(object):
             intent_config = self.intent_config(intent_name)
             should_use_entity = intent_config.get('use_entities', True)
             if should_use_entity:
-                key = "entity_{0}".format(entity["entity"])
-                state_dict[key] = 1.0
+                if "entity" in entity:
+                    key = "entity_{0}".format(entity["entity"])
+                    state_dict[key] = 1.0
 
         # Set all set slots with the featurization of the stored value
         for key, slot in tracker.slots.items():
@@ -572,9 +578,21 @@ class Domain(object):
                 if intent.get("use_entities"):
                     data["intents"][idx] = name
 
-        for name, slot in data["slots"].items():
+        for slot in data["slots"].values():
             if slot["initial_value"] is None:
                 del slot["initial_value"]
+            if slot["auto_fill"]:
+                del slot["auto_fill"]
+            if slot["type"].startswith('rasa_core.slots'):
+                slot["type"] = Slot.resolve_by_type(slot["type"]).type_name
+
+        if data["config"]["store_entities_as_slots"]:
+            del data["config"]["store_entities_as_slots"]
+
+        # clean empty keys
+        data = {k: v
+                for k, v in data.items()
+                if v != {} and v != [] and v is not None}
 
         utils.dump_obj_as_yaml_to_file(filename, data)
 

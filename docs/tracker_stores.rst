@@ -1,3 +1,7 @@
+:desc: All conversations are stored within a tracker store. Read how open source
+       library Rasa Core provides implementations for different store types out
+       of the box.
+
 .. _tracker_store:
 
 
@@ -39,7 +43,7 @@ RedisTrackerStore
         .. code-block:: yaml
 
             tracker_store:
-                store_type: redis
+                type: redis
                 url: <host of the redis instance, e.g. localhost>
                 port: <port of your redis instance, usually 6379>
                 db: <number of your database within redis, e.g. 0>
@@ -73,11 +77,15 @@ MongoTrackerStore
         .. code-block:: yaml
 
             tracker_store:
-                store_type: mongod
+                type: mongod
                 url: <url to your mongo instance, e.g. mongodb://localhost:27017>
                 db: <name of the db within your mongo instance, e.g. rasa>
                 username: <username used for authentication>
                 password: <password used for authentication>
+                auth_source: <database name associated with the user’s credentials>
+
+        You can also add more advanced configurations (like enabling ssl) by appending
+        a parameter to the url field, e.g. mongodb://localhost:27017/?ssl=true
 
     3. To start the Rasa Core server using your configured MongoDB instance,
            add the :code:`--endpoints` flag, e.g.:
@@ -92,6 +100,7 @@ MongoTrackerStore
     - ``password`` (default: ``None``): The password which is used for authentication
     - ``collection`` (default: ``conversations``): The collection name which is
       used to store the conversations
+    - ``auth_source`` (default: ``admin``): database name associated with the user’s credentials.
 
 Custom Tracker Store
 ~~~~~~~~~~~~~~~~~~~~
@@ -111,9 +120,7 @@ Custom Tracker Store
         .. code-block:: yaml
 
             tracker_store:
-              store_type: path.to.your.module.Class
+              type: path.to.your.module.Class
               url: localhost
               a_parameter: a value
               another_parameter: another value
-
-

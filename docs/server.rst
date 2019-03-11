@@ -1,4 +1,5 @@
-:desc: The Rasa Core REST API
+:desc: Find out how to use the HTTP API of Rasa Core to integrate
+       with your backend components.
 
 .. _section_http:
 
@@ -38,7 +39,7 @@ models with:
 .. code-block:: bash
 
     $ python -m rasa_core.run \
-        --enable_api
+        --enable_api \
         -d models/dialogue \
         -u models/nlu/current \
         -o out.log

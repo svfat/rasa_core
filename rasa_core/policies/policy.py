@@ -1,5 +1,6 @@
 import copy
 import logging
+import tensorflow as tf
 from typing import (
     Any, List, Optional, Text, Dict, Callable)
 
@@ -28,8 +29,20 @@ class Policy(object):
         else:
             return cls._standard_featurizer()
 
-    def __init__(self, featurizer: Optional[TrackerFeaturizer] = None) -> None:
+    @staticmethod
+    def _load_tf_config(config: Dict[Text, Any]) -> Optional[tf.ConfigProto]:
+        """Prepare tf.ConfigProto for training"""
+        if config.get("tf_config") is not None:
+            return tf.ConfigProto(**config.pop("tf_config"))
+        else:
+            return None
+
+    def __init__(self,
+                 featurizer: Optional[TrackerFeaturizer] = None,
+                 priority: Optional[int] = 1
+                 ) -> None:
         self.__featurizer = self._create_featurizer(featurizer)
+        self.priority = priority
 
     @property
     def featurizer(self):
@@ -137,3 +150,21 @@ class Policy(object):
             Needs to load its featurizer"""
         raise NotImplementedError("Policy must have the capacity "
                                   "to load itself.")
+
+
+def confidence_scores_for(action_name, value, domain):
+    """Returns confidence scores if a single action is predicted.
+
+    Args:
+        action_name: Name of action for which the score should be set.
+        value: Confidence for `action_name`.
+        domain: Domain which contains all actions.
+
+    Returns: List of length `len(nr_actions)`.
+
+    """
+    results = [0.0] * domain.num_actions
+    idx = domain.index_for_action(action_name)
+    results[idx] = value
+
+    return results

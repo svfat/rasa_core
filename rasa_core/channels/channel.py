@@ -1,5 +1,6 @@
 import inspect
 import json
+import uuid
 from multiprocessing import Queue
 from threading import Thread
 from typing import Text, List, Dict, Any, Optional, Callable, Iterable
@@ -27,10 +28,18 @@ class UserMessage(object):
                  output_channel: Optional['OutputChannel'] = None,
                  sender_id: Text = None,
                  parse_data: Dict[Text, Any] = None,
-                 input_channel: Text = None
+                 input_channel: Text = None,
+                 message_id: Text = None
                  ) -> None:
+        if text:
+            self.text = text.strip()
+        else:
+            self.text = text
 
-        self.text = text
+        if message_id is not None:
+            self.message_id = str(message_id)
+        else:
+            self.message_id = uuid.uuid4().hex
 
         if output_channel is not None:
             self.output_channel = output_channel
@@ -50,19 +59,53 @@ class UserMessage(object):
 def register(input_channels: List['InputChannel'],
              app: Flask,
              on_new_message: Callable[[UserMessage], None],
-             route: Text
+             route: Optional[Text]
              ) -> None:
     for channel in input_channels:
-        p = urljoin(route, channel.url_prefix())
+        if route:
+            p = urljoin(route, channel.url_prefix())
+        else:
+            p = None
+
         app.register_blueprint(channel.blueprint(on_new_message), url_prefix=p)
 
 
 def button_to_string(button, idx=0):
     """Create a string representation of a button."""
-    return "{idx}: {title} ({val})".format(
+
+    title = button.pop('title', '')
+
+    if 'payload' in button:
+        payload = " ({})".format(button.pop('payload'))
+    else:
+        payload = ""
+
+    # if there are any additional attributes, we append them to the output
+    if button:
+        details = " - {}".format(json.dumps(button, sort_keys=True))
+    else:
+        details = ""
+
+    button_string = "{idx}: {title}{payload}{details}".format(
         idx=idx + 1,
-        title=button.get('title', ''),
-        val=button.get('payload', ''))
+        title=title,
+        payload=payload,
+        details=details)
+
+    return button_string
+
+
+def element_to_string(element, idx=0):
+    """Create a string representation of an element."""
+
+    title = element.pop('title', '')
+
+    element_string = "{idx}: {title} - {element}".format(
+        idx=idx + 1,
+        title=title,
+        element=json.dumps(element, sort_keys=True))
+
+    return element_string
 
 
 class InputChannel(object):
@@ -251,6 +294,7 @@ class QueueOutputChannel(CollectingOutputChannel):
         return "queue"
 
     def __init__(self, message_queue: Queue = None) -> None:
+        super(QueueOutputChannel).__init__()
         self.messages = Queue() if not message_queue else message_queue
 
     def latest_output(self):

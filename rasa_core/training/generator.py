@@ -60,7 +60,7 @@ class TrackerWithCachedStates(DialogueStateTracker):
         """Reset the states."""
         self._states = None
 
-    def init_copy(self)-> 'TrackerWithCachedStates':
+    def init_copy(self) -> 'TrackerWithCachedStates':
         """Create a new state tracker with the same initial values."""
         return type(self)("",
                           self.slots.values(),
@@ -151,7 +151,7 @@ class TrainingDataGenerator(object):
 
         self.story_graph = story_graph.with_cycles_removed()
         if debug_plots:
-            self.story_graph.visualize('story_blocks_connections.pdf')
+            self.story_graph.visualize('story_blocks_connections.html')
 
         self.domain = domain
 

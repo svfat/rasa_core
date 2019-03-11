@@ -1,25 +1,59 @@
-from rasa_core import training
-
 from unittest.mock import patch
+
 import numpy as np
 import pytest
 
+from rasa_core import training
+from rasa_core.actions.action import (ACTION_LISTEN_NAME,
+                                      ActionRevertFallbackEvents,
+                                      ACTION_DEFAULT_ASK_AFFIRMATION_NAME,
+                                      ACTION_DEFAULT_ASK_REPHRASE_NAME,
+                                      ACTION_DEFAULT_FALLBACK_NAME)
 from rasa_core.channels import UserMessage
-from rasa_core.domain import Domain
+from rasa_core.domain import Domain, InvalidDomain
+from rasa_core.events import ActionExecuted
+from rasa_core.featurizers import (
+    MaxHistoryTrackerFeaturizer,
+    BinarySingleStateFeaturizer)
+from rasa_core.policies import TwoStageFallbackPolicy
+from rasa_core.policies.embedding_policy import EmbeddingPolicy
+from rasa_core.policies.fallback import FallbackPolicy
+from rasa_core.policies.form_policy import FormPolicy
 from rasa_core.policies.keras_policy import KerasPolicy
 from rasa_core.policies.memoization import (
     MemoizationPolicy, AugmentedMemoizationPolicy)
 from rasa_core.policies.sklearn_policy import SklearnPolicy
-from rasa_core.policies.fallback import FallbackPolicy
-from rasa_core.policies.embedding_policy import EmbeddingPolicy
-from rasa_core.policies.form_policy import FormPolicy
 from rasa_core.trackers import DialogueStateTracker
 from tests.conftest import DEFAULT_DOMAIN_PATH, DEFAULT_STORIES_FILE
-from rasa_core.featurizers import (
-    MaxHistoryTrackerFeaturizer,
-    BinarySingleStateFeaturizer, FullDialogueTrackerFeaturizer)
-from rasa_core.events import ActionExecuted
-from tests.utilities import read_dialogue_file
+from tests.utilities import read_dialogue_file, user_uttered, get_tracker
+
+
+def tf_defaults():
+    return {
+        "tf_config": {
+            "device_count": {"CPU": 4},
+            # tell tf.Session to use CPU limit, if you have
+            # more CPU, you can increase this value appropriately
+            "inter_op_parallelism_threads": 0,
+            # the number of threads in the thread pool available
+            # for each process for blocking operation nodes set to 0
+            # to allow the system to select the appropriate value.
+            "intra_op_parallelism_threads": 0,  # tells the degree of thread
+            # parallelism of the tf.Session operation.
+            # the smaller the value, the less reuse the thread will have
+            # and the more likely it will use more CPU cores.
+            # if the value is 0,
+            # tensorflow will automatically select an appropriate value.
+            "gpu_options": {"allow_growth": True}
+            # if set True, will try to allocate
+            # as much GPU memory as possible to support running
+        }
+    }
+
+
+def session_config():
+    import tensorflow as tf
+    return tf.ConfigProto(**tf_defaults()["tf_config"])
 
 
 def train_trackers(domain):
@@ -32,10 +66,10 @@ def train_trackers(domain):
 
 # We are going to use class style testing here since unfortunately pytest
 # doesn't support using fixtures as arguments to its own parameterize yet
-# (hence, we can't train a policy, declare it as a fixture and use the different
-# fixtures of the different policies for the functional tests). Therefore, we
-# are going to reverse this and train the policy within a class and collect the
-# tests in a base class.
+# (hence, we can't train a policy, declare it as a fixture and use the
+# different fixtures of the different policies for the functional tests).
+# Therefore, we are going to reverse this and train the policy within a class
+# and collect the tests in a base class.
 class PolicyTestCollection(object):
     """Tests every policy needs to fulfill.
 
@@ -43,7 +77,7 @@ class PolicyTestCollection(object):
 
     max_history = 3  # this is the amount of history we test on
 
-    def create_policy(self, featurizer):
+    def create_policy(self, featurizer, priority):
         raise NotImplementedError
 
     @pytest.fixture(scope="module")
@@ -53,9 +87,13 @@ class PolicyTestCollection(object):
         return featurizer
 
     @pytest.fixture(scope="module")
-    def trained_policy(self, featurizer):
+    def priority(self):
+        return 1
+
+    @pytest.fixture(scope="module")
+    def trained_policy(self, featurizer, priority):
         default_domain = Domain.load(DEFAULT_DOMAIN_PATH)
-        policy = self.create_policy(featurizer)
+        policy = self.create_policy(featurizer, priority)
         training_trackers = train_trackers(default_domain)
         policy.train(training_trackers, default_domain)
         return policy
@@ -82,54 +120,78 @@ class PolicyTestCollection(object):
         assert min(probabilities) >= 0.0
 
     def test_persist_and_load_empty_policy(self, tmpdir):
-        empty_policy = self.create_policy(None)
+        empty_policy = self.create_policy(None, None)
         empty_policy.persist(tmpdir.strpath)
         loaded = empty_policy.__class__.load(tmpdir.strpath)
         assert loaded is not None
+
+    def test_tf_config(self, trained_policy, tmpdir):
+        if hasattr(trained_policy, 'session'):
+            # noinspection PyProtectedMember
+            assert trained_policy.session._config is None
+            trained_policy.persist(tmpdir.strpath)
+            loaded = trained_policy.__class__.load(tmpdir.strpath)
+            # noinspection PyProtectedMember
+            assert loaded.session._config is None
 
 
 class TestKerasPolicy(PolicyTestCollection):
 
     @pytest.fixture(scope="module")
-    def create_policy(self, featurizer):
-        p = KerasPolicy(featurizer)
+    def create_policy(self, featurizer, priority):
+        p = KerasPolicy(featurizer, priority)
         return p
+
+
+class TestKerasPolicyWithTfConfig(PolicyTestCollection):
+
+    @pytest.fixture(scope="module")
+    def create_policy(self, featurizer, priority):
+        p = KerasPolicy(featurizer, priority, **tf_defaults())
+        return p
+
+    def test_tf_config(self, trained_policy, tmpdir):
+        # noinspection PyProtectedMember
+        assert trained_policy.session._config == session_config()
+        trained_policy.persist(tmpdir.strpath)
+        loaded = trained_policy.__class__.load(tmpdir.strpath)
+        # noinspection PyProtectedMember
+        assert loaded.session._config == session_config()
 
 
 class TestFallbackPolicy(PolicyTestCollection):
 
     @pytest.fixture(scope="module")
-    def create_policy(self, featurizer):
-        p = FallbackPolicy()
+    def create_policy(self, featurizer, priority):
+        p = FallbackPolicy(priority=priority)
         return p
 
     @pytest.mark.parametrize(
-        "nlu_confidence, prev_action_is_fallback, should_fallback",
+        "nlu_confidence, last_action_name, should_nlu_fallback",
         [
-            (0.1, True, False),
-            (0.1, False, True),
-            (0.9, True, False),
-            (0.9, False, False),
+            (0.1, 'some_action', False),
+            (0.1, 'action_listen', True),
+            (0.9, 'some_action', False),
+            (0.9, 'action_listen', False),
         ])
-    def test_something(self,
-                       trained_policy,
-                       nlu_confidence,
-                       prev_action_is_fallback,
-                       should_fallback):
-        last_action_name = trained_policy.fallback_action_name if \
-            prev_action_is_fallback else 'not_fallback'
-        assert trained_policy.should_fallback(
-            nlu_confidence, last_action_name) is should_fallback
+    def test_should_nlu_fallback(self,
+                                 trained_policy,
+                                 nlu_confidence,
+                                 last_action_name,
+                                 should_nlu_fallback):
+
+        assert trained_policy.should_nlu_fallback(
+            nlu_confidence, last_action_name) is should_nlu_fallback
 
 
 class TestMemoizationPolicy(PolicyTestCollection):
 
     @pytest.fixture(scope="module")
-    def create_policy(self, featurizer):
+    def create_policy(self, featurizer, priority):
         max_history = None
         if isinstance(featurizer, MaxHistoryTrackerFeaturizer):
             max_history = featurizer.max_history
-        p = MemoizationPolicy(max_history=max_history)
+        p = MemoizationPolicy(priority=priority, max_history=max_history)
         return p
 
     def test_memorise(self, trained_policy, default_domain):
@@ -151,7 +213,7 @@ class TestMemoizationPolicy(PolicyTestCollection):
         assert trained_policy._recall_states(random_states) is None
 
     def test_memorise_with_nlu(self, trained_policy, default_domain):
-        filename = "data/test_dialogues/nlu_dialogue.json"
+        filename = "data/test_dialogues/default.json"
         dialogue = read_dialogue_file(filename)
 
         tracker = DialogueStateTracker(dialogue.name, default_domain.slots)
@@ -166,18 +228,19 @@ class TestMemoizationPolicy(PolicyTestCollection):
 class TestAugmentedMemoizationPolicy(PolicyTestCollection):
 
     @pytest.fixture(scope="module")
-    def create_policy(self, featurizer):
+    def create_policy(self, featurizer, priority):
         max_history = None
         if isinstance(featurizer, MaxHistoryTrackerFeaturizer):
             max_history = featurizer.max_history
-        p = AugmentedMemoizationPolicy(max_history=max_history)
+        p = AugmentedMemoizationPolicy(priority=priority,
+                                       max_history=max_history)
         return p
 
 
 class TestSklearnPolicy(PolicyTestCollection):
 
-    def create_policy(self, featurizer, **kwargs):
-        p = SklearnPolicy(featurizer, **kwargs)
+    def create_policy(self, featurizer, priority, **kwargs):
+        p = SklearnPolicy(featurizer, priority, **kwargs)
         return p
 
     @pytest.yield_fixture
@@ -205,17 +268,20 @@ class TestSklearnPolicy(PolicyTestCollection):
                                              mock_search,
                                              default_domain,
                                              trackers,
-                                             featurizer):
-        policy = self.create_policy(featurizer=featurizer, cv=None)
+                                             featurizer,
+                                             priority):
+        policy = self.create_policy(featurizer=featurizer, priority=priority,
+                                    cv=None)
         policy.train(trackers, domain=default_domain)
 
         assert mock_search.call_count == 0
         assert policy.model != 'mockmodel'
 
     def test_cv_not_none_param_grid_none_triggers_search_without_params(
-            self, mock_search, default_domain, trackers, featurizer):
+            self, mock_search, default_domain, trackers, featurizer, priority):
 
-        policy = self.create_policy(featurizer=featurizer, cv=3)
+        policy = self.create_policy(featurizer=featurizer, priority=priority,
+                                    cv=3)
         policy.train(trackers, domain=default_domain)
 
         assert mock_search.call_count > 0
@@ -224,10 +290,11 @@ class TestSklearnPolicy(PolicyTestCollection):
         assert policy.model == 'mockmodel'
 
     def test_cv_not_none_param_grid_none_triggers_search_with_params(
-            self, mock_search, default_domain, trackers, featurizer):
+            self, mock_search, default_domain, trackers, featurizer, priority):
         param_grid = {'n_estimators': 50}
         policy = self.create_policy(
             featurizer=featurizer,
+            priority=priority,
             cv=3,
             param_grid=param_grid,
         )
@@ -239,11 +306,12 @@ class TestSklearnPolicy(PolicyTestCollection):
         assert policy.model == 'mockmodel'
 
     def test_missing_classes_filled_correctly(
-            self, default_domain, trackers, tracker, featurizer):
+            self, default_domain, trackers, tracker, featurizer, priority):
         # Pretend that a couple of classes are missing and check that
         # those classes are predicted as 0, while the other class
         # probabilities are predicted normally.
-        policy = self.create_policy(featurizer=featurizer, cv=None)
+        policy = self.create_policy(featurizer=featurizer, priority=priority,
+                                    cv=None)
 
         classes = [1, 3]
         new_trackers = []
@@ -274,14 +342,16 @@ class TestSklearnPolicy(PolicyTestCollection):
                 assert prob == 0.0
 
     def test_train_kwargs_are_set_on_model(
-            self, default_domain, trackers, featurizer):
-        policy = self.create_policy(featurizer=featurizer, cv=None)
-        policy.train(trackers, domain=default_domain, C=123)
+            self, default_domain, trackers, featurizer, priority):
+        policy = self.create_policy(featurizer=featurizer, priority=priority,
+                                    cv=None, C=123)
+        policy.train(trackers, domain=default_domain)
         assert policy.model.C == 123
 
     def test_train_with_shuffle_false(
-            self, default_domain, trackers, featurizer):
-        policy = self.create_policy(featurizer=featurizer, shuffle=False)
+            self, default_domain, trackers, featurizer, priority):
+        policy = self.create_policy(featurizer=featurizer, priority=priority,
+                                    shuffle=False)
         # does not raise
         policy.train(trackers, domain=default_domain)
 
@@ -289,88 +359,70 @@ class TestSklearnPolicy(PolicyTestCollection):
 class TestEmbeddingPolicyNoAttention(PolicyTestCollection):
 
     @pytest.fixture(scope="module")
-    def create_policy(self, featurizer):
+    def create_policy(self, featurizer, priority):
         # use standard featurizer from EmbeddingPolicy,
         # since it is using FullDialogueTrackerFeaturizer
-        p = EmbeddingPolicy()
+        p = EmbeddingPolicy(priority=priority, attn_before_rnn=False,
+                            attn_after_rnn=False)
         return p
-
-    @pytest.fixture(scope="module")
-    def trained_policy(self, featurizer):
-        default_domain = Domain.load(DEFAULT_DOMAIN_PATH)
-        policy = self.create_policy(featurizer)
-        training_trackers = train_trackers(default_domain)
-        policy.train(training_trackers, default_domain,
-                     attn_before_rnn=False,
-                     attn_after_rnn=False)
-        return policy
 
 
 class TestEmbeddingPolicyAttentionBeforeRNN(PolicyTestCollection):
 
     @pytest.fixture(scope="module")
-    def create_policy(self, featurizer):
+    def create_policy(self, featurizer, priority):
         # use standard featurizer from EmbeddingPolicy,
         # since it is using FullDialogueTrackerFeaturizer
-        p = EmbeddingPolicy()
+        p = EmbeddingPolicy(priority=priority, attn_before_rnn=True,
+                            attn_after_rnn=False)
         return p
-
-    @pytest.fixture(scope="module")
-    def trained_policy(self, featurizer):
-        default_domain = Domain.load(DEFAULT_DOMAIN_PATH)
-        policy = self.create_policy(featurizer)
-        training_trackers = train_trackers(default_domain)
-        policy.train(training_trackers, default_domain,
-                     attn_before_rnn=True,
-                     attn_after_rnn=False)
-        return policy
 
 
 class TestEmbeddingPolicyAttentionAfterRNN(PolicyTestCollection):
 
     @pytest.fixture(scope="module")
-    def create_policy(self, featurizer):
+    def create_policy(self, featurizer, priority):
         # use standard featurizer from EmbeddingPolicy,
         # since it is using FullDialogueTrackerFeaturizer
-        p = EmbeddingPolicy()
+        p = EmbeddingPolicy(priority=priority, attn_before_rnn=False,
+                            attn_after_rnn=True)
         return p
-
-    @pytest.fixture(scope="module")
-    def trained_policy(self, featurizer):
-        default_domain = Domain.load(DEFAULT_DOMAIN_PATH)
-        policy = self.create_policy(featurizer)
-        training_trackers = train_trackers(default_domain)
-        policy.train(training_trackers, default_domain,
-                     attn_before_rnn=False,
-                     attn_after_rnn=True)
-        return policy
 
 
 class TestEmbeddingPolicyAttentionBoth(PolicyTestCollection):
 
     @pytest.fixture(scope="module")
-    def create_policy(self, featurizer):
+    def create_policy(self, featurizer, priority):
         # use standard featurizer from EmbeddingPolicy,
         # since it is using FullDialogueTrackerFeaturizer
-        p = EmbeddingPolicy()
+        p = EmbeddingPolicy(priority=priority, attn_before_rnn=True,
+                            attn_after_rnn=True)
         return p
 
+
+class TestEmbeddingPolicyWithTfConfig(PolicyTestCollection):
+
     @pytest.fixture(scope="module")
-    def trained_policy(self, featurizer):
-        default_domain = Domain.load(DEFAULT_DOMAIN_PATH)
-        policy = self.create_policy(featurizer)
-        training_trackers = train_trackers(default_domain)
-        policy.train(training_trackers, default_domain,
-                     attn_before_rnn=True,
-                     attn_after_rnn=True)
-        return policy
+    def create_policy(self, featurizer, priority):
+        # use standard featurizer from EmbeddingPolicy,
+        # since it is using FullDialogueTrackerFeaturizer
+        p = EmbeddingPolicy(priority=priority, **tf_defaults())
+        return p
+
+    def test_tf_config(self, trained_policy, tmpdir):
+        # noinspection PyProtectedMember
+        assert trained_policy.session._config == session_config()
+        trained_policy.persist(tmpdir.strpath)
+        loaded = trained_policy.__class__.load(tmpdir.strpath)
+        # noinspection PyProtectedMember
+        assert loaded.session._config == session_config()
 
 
 class TestFormPolicy(PolicyTestCollection):
 
     @pytest.fixture(scope="module")
-    def create_policy(self, featurizer):
-        p = FormPolicy()
+    def create_policy(self, featurizer, priority):
+        p = FormPolicy(priority=priority)
         return p
 
     def test_memorise(self, trained_policy, default_domain):
@@ -422,3 +474,228 @@ class TestFormPolicy(PolicyTestCollection):
                           for f, num in
                           zip(domain.input_states, nums)}]
         assert trained_policy.recall(random_states, None, domain) is None
+
+
+class TestTwoStageFallbackPolicy(PolicyTestCollection):
+
+    @pytest.fixture(scope="module")
+    def create_policy(self, featurizer, priority):
+        p = TwoStageFallbackPolicy(priority=priority,
+                                   deny_suggestion_intent_name='deny')
+        return p
+
+    @pytest.fixture(scope="class")
+    def default_domain(self):
+        content = """
+        actions:
+          - utter_hello
+
+        intents:
+          - greet
+          - bye
+          - affirm
+          - deny
+        """
+        return Domain.from_yaml(content)
+
+    def _get_next_action(self, policy, events, domain):
+        tracker = get_tracker(events)
+
+        scores = policy.predict_action_probabilities(tracker, domain)
+        index = scores.index(max(scores))
+        return domain.action_names[index]
+
+    def _get_tracker_after_reverts(self, events, dispatcher, domain):
+        tracker = get_tracker(events)
+        action = ActionRevertFallbackEvents()
+        events += action.run(dispatcher, tracker, domain)
+
+        return get_tracker(events)
+
+    def test_ask_affirmation(self, trained_policy, default_domain):
+        events = [ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered("Hi", 0.2)]
+
+        next_action = self._get_next_action(trained_policy, events,
+                                            default_domain)
+
+        assert next_action == ACTION_DEFAULT_ASK_AFFIRMATION_NAME
+
+    def test_affirmation(self, default_dispatcher_collecting, default_domain):
+        events = [ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered('greet', 1),
+                  ActionExecuted('utter_hello'),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered('greet', 0.2),
+                  ActionExecuted(ACTION_DEFAULT_ASK_AFFIRMATION_NAME),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered('greet', 1)]
+
+        tracker = self._get_tracker_after_reverts(
+            events,
+            default_dispatcher_collecting,
+            default_domain
+        )
+
+        assert 'greet' == tracker.latest_message.parse_data['intent']['name']
+        assert tracker.export_stories() == ("## sender\n"
+                                            "* greet\n"
+                                            "    - utter_hello\n"
+                                            "* greet\n")
+
+    def test_ask_rephrase(self, trained_policy, default_domain):
+        events = [ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered("greet", 0.2),
+                  ActionExecuted(ACTION_DEFAULT_ASK_AFFIRMATION_NAME),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered('deny', 1)]
+
+        next_action = self._get_next_action(trained_policy, events,
+                                            default_domain)
+
+        assert next_action == ACTION_DEFAULT_ASK_REPHRASE_NAME
+
+    def test_successful_rephrasing(self, trained_policy,
+                                   default_dispatcher_collecting,
+                                   default_domain):
+        events = [ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered("greet", 0.2),
+                  ActionExecuted(ACTION_DEFAULT_ASK_AFFIRMATION_NAME),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered('deny', 1),
+                  ActionExecuted(ACTION_DEFAULT_ASK_REPHRASE_NAME),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered("bye", 1),
+                  ]
+
+        tracker = self._get_tracker_after_reverts(
+            events,
+            default_dispatcher_collecting,
+            default_domain
+        )
+
+        assert 'bye' == tracker.latest_message.parse_data['intent']['name']
+        assert tracker.export_stories() == "## sender\n* bye\n"
+
+    def test_affirm_rephrased_intent(self, trained_policy, default_domain):
+        events = [ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered("greet", 0.2),
+                  ActionExecuted(ACTION_DEFAULT_ASK_AFFIRMATION_NAME),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered('deny', 1),
+                  ActionExecuted(ACTION_DEFAULT_ASK_REPHRASE_NAME),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered("greet", 0.2),
+                  ]
+
+        next_action = self._get_next_action(trained_policy, events,
+                                            default_domain)
+
+        assert next_action == ACTION_DEFAULT_ASK_AFFIRMATION_NAME
+
+    def test_affirmed_rephrasing(self, trained_policy,
+                                 default_dispatcher_collecting,
+                                 default_domain):
+        events = [ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered("greet", 0.2),
+                  ActionExecuted(ACTION_DEFAULT_ASK_AFFIRMATION_NAME),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered('deny', 1),
+                  ActionExecuted(ACTION_DEFAULT_ASK_REPHRASE_NAME),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered("bye", 0.2),
+                  ActionExecuted(ACTION_DEFAULT_ASK_AFFIRMATION_NAME),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered('bye', 1)
+                  ]
+
+        tracker = self._get_tracker_after_reverts(
+            events,
+            default_dispatcher_collecting,
+            default_domain
+        )
+
+        assert 'bye' == tracker.latest_message.parse_data['intent']['name']
+        assert tracker.export_stories() == "## sender\n* bye\n"
+
+    def test_denied_rephrasing_affirmation(self, trained_policy,
+                                           default_domain):
+        events = [ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered("greet", 0.2),
+                  ActionExecuted(ACTION_DEFAULT_ASK_AFFIRMATION_NAME),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered('deny', 1),
+                  ActionExecuted(ACTION_DEFAULT_ASK_REPHRASE_NAME),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered("bye", 0.2),
+                  ActionExecuted(ACTION_DEFAULT_ASK_AFFIRMATION_NAME),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered('deny', 1)
+                  ]
+
+        next_action = self._get_next_action(trained_policy, events,
+                                            default_domain)
+
+        assert next_action == ACTION_DEFAULT_FALLBACK_NAME
+
+    def test_rephrasing_instead_affirmation(self, trained_policy,
+                                            default_dispatcher_collecting,
+                                            default_domain):
+        events = [ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered("greet", 1),
+                  ActionExecuted("utter_hello"),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered("greet", 0.2),
+                  ActionExecuted(ACTION_DEFAULT_ASK_AFFIRMATION_NAME),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered("bye", 1),
+                  ]
+
+        tracker = self._get_tracker_after_reverts(
+            events,
+            default_dispatcher_collecting,
+            default_domain
+        )
+
+        assert 'bye' == tracker.latest_message.parse_data['intent']['name']
+        assert tracker.export_stories() == ("## sender\n"
+                                            "* greet\n"
+                                            "    - utter_hello\n"
+                                            "* bye\n")
+
+    def test_unknown_instead_affirmation(self, trained_policy, default_domain):
+        events = [ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered("greet", 0.2),
+                  ActionExecuted(ACTION_DEFAULT_ASK_AFFIRMATION_NAME),
+                  ActionExecuted(ACTION_LISTEN_NAME),
+                  user_uttered("greet", 0.2),
+                  ]
+
+        next_action = self._get_next_action(trained_policy, events,
+                                            default_domain)
+
+        assert next_action == ACTION_DEFAULT_FALLBACK_NAME
+
+    def test_listen_after_hand_off(self, trained_policy, default_domain):
+        events = [ActionExecuted(ACTION_DEFAULT_FALLBACK_NAME)]
+
+        next_action = self._get_next_action(trained_policy, events,
+                                            default_domain)
+
+        assert next_action == ACTION_LISTEN_NAME
+
+    def test_exception_if_intent_not_present(self, trained_policy):
+        content = """
+                actions:
+                  - utter_hello
+
+                intents:
+                  - greet
+                """
+        domain = Domain.from_yaml(content)
+
+        events = [ActionExecuted(ACTION_DEFAULT_FALLBACK_NAME)]
+
+        tracker = get_tracker(events)
+        with pytest.raises(InvalidDomain):
+            trained_policy.predict_action_probabilities(tracker, domain)
